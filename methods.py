@@ -34,16 +34,20 @@ def add_source_files_orig(self, sources, files, allow_gen=False):
         # They should instead be added manually.
         skip_gen_cpp = "*" in files
         files = self.Glob(files)
+        if files is None:
+            print_warning('Glob returned None for pattern "{}"'.format(files))
+            return
         if skip_gen_cpp and not allow_gen:
             files = [f for f in files if not str(f).endswith(".gen.cpp")]
 
     # Add each path as compiled Object following environment (self) configuration
-    for path in files:
-        obj = self.Object(path)
-        if obj in sources:
-            print_warning('Object "{}" already included in environment sources.'.format(obj))
-            continue
-        sources.append(obj)
+    if files is not None:
+        for path in files:
+            obj = self.Object(path)
+            if obj in sources:
+                print_warning('Object "{}" already included in environment sources.'.format(obj))
+                continue
+            sources.append(obj)
 
 
 def add_source_files_scu(self, sources, files, allow_gen=False):
