@@ -2,6 +2,7 @@
 from typing import Any, Dict, List, Optional, Union
 import os
 import sys
+import importlib.util
 
 from .base import (
     SConsError, UnsupportedFeatureError, BuildError,
@@ -11,6 +12,7 @@ from .base import (
 from .functions import Glob, Value, Run, CommandNoCache
 from . import detect
 from . import platform
+from .module_loader import ModuleLoader
 from .environment import SConsEnvironment
 from .variables import Variable, EnumVariable, BoolVariable, PathVariable, ListVariable, Variables
 from .builders import Action, Builder, Program, StaticLibrary, SharedLibrary, Object
@@ -28,6 +30,7 @@ class SConsInterpreter:
         self.targets: Dict[str, Any] = {}
         self.current_script_dir = ""
         self.project_root = project_root
+        self._module_loader = ModuleLoader()  # Module loader instance
         self._dict = {}
         self._variant_dir = None  # Current variant directory
         self._default_env_instance = None  # Singleton instance for DefaultEnvironment()
@@ -111,7 +114,7 @@ class SConsInterpreter:
             'ModuleType': __import__('types').ModuleType,  # Add ModuleType
             'module_from_spec': __import__('importlib.util').module_from_spec,  # Add module_from_spec
             'spec_from_file_location': __import__('importlib.util').spec_from_file_location,  # Add spec_from_file_location
-            '_helper_module': lambda name, path: None,  # Mock _helper_module function
+            '_helper_module': self._module_loader.load_module,  # Add module loader function
         }
         print(f"DEBUG: Global namespace created with keys: {list(global_dict.keys())}")
         return global_dict
