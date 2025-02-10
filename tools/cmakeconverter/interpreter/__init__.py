@@ -30,15 +30,16 @@ class SConsInterpreter:
         self.targets: Dict[str, Any] = {}
         self.current_script_dir = ""
         self.project_root = project_root
-        self._module_loader = ModuleLoader()  # Module loader instance
         self._dict = {}
         self._variant_dir = None  # Current variant directory
         self._default_env_instance = None  # Singleton instance for DefaultEnvironment()
-        
+        self._module_loader = ModuleLoader()  # Module loader instance
+        self._modules = {}  # Cache for loaded modules
+
         if project_root:
             # Add project root to Python path for imports
             sys.path.insert(0, project_root)
-            
+
         # Initialize basic SCons variables
         self.variables.update({
             'ARGUMENTS': {},
@@ -46,27 +47,67 @@ class SConsInterpreter:
             'BUILD_DIR': 'build',
             'ENV': os.environ.copy(),
         })
-        
+
+    def _helper_module(self, name: str, path: str) -> Any:
+        """Load a helper module"""
+        if name in self._modules:
+            return self._modules[name]
+
+        # Convert path to absolute path
+        if not os.path.isabs(path):
+            path = os.path.join(self.project_root or "", path)
+
+        # Create module spec
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None:
+            raise SConsError(f"Could not create module spec for {name} at {path}")
+
+        # Create module
+        module = importlib.util.module_from_spec(spec)
+        if spec.loader is None:
+            raise SConsError(f"Could not create module loader for {name} at {path}")
+
+        # Execute module
+        spec.loader.exec_module(module)
+
+        # Cache module
+        self._modules[name] = module
+        sys.modules[name] = module
+
+        # Handle parent modules
+        parent_name = name
+        while True:
+            try:
+                parent_name, child_name = parent_name.rsplit(".", 1)
+                if parent_name not in sys.modules:
+                    parent = type(str("ParentModule"), (), {"__path__": []})()
+                    sys.modules[parent_name] = parent
+                    setattr(sys.modules[parent_name], child_name, module)
+            except ValueError:
+                break
+
+        return module
+
     def _create_global_namespace(self, env: Optional[SConsEnvironment] = None) -> Dict[str, Any]:
         """Create a new global namespace for script execution"""
         opts = Variables()
-        
+
         if env is None:
             env = self.default_env
-            
+
         if self._default_env_instance is None:
             self._default_env_instance = SConsEnvironment()
-            
+
         def Return(*args):
             """Store return value in global namespace"""
             if len(args) == 1:
                 global_dict['__return_value__'] = args[0]
             elif len(args) > 1:
                 global_dict['__return_value__'] = args
-            
+
         # Import SCons module
         from tools.cmakeconverter import SCons
-        
+
         global_dict = {
             'env': env,
             'Environment': self.Environment,
@@ -100,6 +141,16 @@ class SConsInterpreter:
             'Run': Run,  # Add Run function
             'CommandNoCache': CommandNoCache,  # Add CommandNoCache function
             'detect': detect,  # Add detect module
+            'methods': __import__('tools.cmakeconverter.interpreter.methods', fromlist=['*']),  # Add methods module
+            'platform_methods': __import__('tools.cmakeconverter.interpreter.platform_methods', fromlist=['*']),  # Add platform_methods module
+            'scu_builders': __import__('tools.cmakeconverter.interpreter.scu_builders', fromlist=['*']),  # Add scu_builders module
+            'gles3_builders': __import__('tools.cmakeconverter.interpreter.gles3_builders', fromlist=['*']),  # Add gles3_builders module
+            'glsl_builders': __import__('tools.cmakeconverter.interpreter.glsl_builders', fromlist=['*']),  # Add glsl_builders module
+            'version': __import__('tools.cmakeconverter.interpreter.version', fromlist=['*']),  # Add version module
+            'core': __import__('tools.cmakeconverter.interpreter.core', fromlist=['*']),  # Add core module
+            'main': __import__('tools.cmakeconverter.interpreter.main', fromlist=['*']),  # Add main module
+            'misc': __import__('tools.cmakeconverter.interpreter.misc', fromlist=['*']),  # Add misc module
+            'editor': __import__('tools.cmakeconverter.interpreter.editor', fromlist=['*']),  # Add editor module
             'platform_list': platform.platform_list,  # Add platform variables
             'platform_opts': platform.platform_opts,
             'platform_flags': platform.platform_flags,
@@ -112,54 +163,29 @@ class SConsInterpreter:
             'OrderedDict': __import__('collections').OrderedDict,  # Add OrderedDict
             'pickle': __import__('pickle'),  # Add pickle module
             'ModuleType': __import__('types').ModuleType,  # Add ModuleType
-            'module_from_spec': __import__('importlib.util').module_from_spec,  # Add module_from_spec
-            'spec_from_file_location': __import__('importlib.util').spec_from_file_location,  # Add spec_from_file_location
-            '_helper_module': self._module_loader.load_module,  # Add module loader function
+            'module_from_spec': importlib.util.module_from_spec,  # Add module_from_spec
+            'spec_from_file_location': importlib.util.spec_from_file_location,  # Add spec_from_file_location
+            '_helper_module': self._helper_module,  # Add helper module function
         }
         print(f"DEBUG: Global namespace created with keys: {list(global_dict.keys())}")
         return global_dict
-        
+
     def Environment(self, **kwargs) -> SConsEnvironment:
         """Create a new construction environment"""
         env = SConsEnvironment()
-        
+
         # Process tools
         tools = kwargs.get('tools', ['default'])
         if tools:
             env.tools.extend(tools)
-            
+
         # Process other variables
         for key, value in kwargs.items():
             if key != 'tools':
                 env.variables[key] = value
-                
+
         return env
-    
-    def interpret_file(self, filepath: str) -> None:
-        """Interpret a SCons script file"""
-        try:
-            prev_dir = self.current_script_dir
-            self.current_script_dir = os.path.dirname(filepath)
-            
-            # Add SCons module to Python path
-            converter_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            if converter_root not in sys.path:
-                sys.path.insert(0, converter_root)
-            
-            with open(filepath, 'r') as f:
-                content = f.read()
-            
-            # Execute the SCons script
-            global_dict = self._create_global_namespace()
-            exec(content, global_dict)
-            
-            self.current_script_dir = prev_dir
-            
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise SConsError(f"Error interpreting {filepath}: {str(e)}")
-    
+
     def Export(self, *args, **kwargs):
         """Export variables to other SConscript files"""
         if len(args) == 1 and isinstance(args[0], str):
@@ -183,7 +209,7 @@ class SConsInterpreter:
                 self.variables[f"exported_{key}"] = value
         else:
             raise SConsError("Unsupported Export() format")
-    
+
     def Import(self, *args):
         """Import variables from other SConscript files"""
         if len(args) == 1 and isinstance(args[0], str):
@@ -200,25 +226,25 @@ class SConsInterpreter:
                     self._dict[var] = None
         else:
             raise SConsError("Unsupported Import() format")
-    
+
     def SConscript(self, scripts, *args, **kwargs) -> Any:
         """Process subsidiary SConscript files"""
         if isinstance(scripts, str):
             scripts = [scripts]
-            
+
         # Get variant directory
         variant_dir = kwargs.get('variant_dir')
         if variant_dir:
             prev_variant_dir = self._variant_dir
             self._variant_dir = variant_dir
-            
+
         # Get exports from kwargs
         exports = kwargs.get('exports', [])
         if isinstance(exports, str):
             exports = [exports]
         elif isinstance(exports, dict):
             exports = list(exports.keys())
-            
+
         # Export variables
         for var in exports:
             if var in self.variables:
@@ -227,39 +253,39 @@ class SConsInterpreter:
                 self.variables[f"exported_{var}"] = self._dict[var]
             else:
                 self.variables[f"exported_{var}"] = None
-                
+
         # Process each script
         results = []
         for script in scripts:
             script_path = os.path.join(self.current_script_dir, script)
             if not os.path.exists(script_path):
                 raise SConsError(f"SConscript file not found: {script_path}")
-                
+
             # Save current directory
             prev_dir = self.current_script_dir
             self.current_script_dir = os.path.dirname(script_path)
-            
+
             # Create a new global namespace for the script
             global_dict = self._create_global_namespace()
-            
+
             # Execute the script
             with open(script_path, 'r') as f:
                 content = f.read()
             exec(content, global_dict)
-            
+
             # Check for Return value
             if 'Return' in content:
                 result = global_dict.get('__return_value__')
                 if result is not None:
                     results.append(result)
-                
+
             # Restore current directory
             self.current_script_dir = prev_dir
-            
+
         # Restore variant directory
         if variant_dir:
             self._variant_dir = prev_variant_dir
-            
+
         # Return results
         if not results:
             return None
@@ -267,3 +293,28 @@ class SConsInterpreter:
             return results[0]
         else:
             return results
+
+    def interpret_file(self, filepath: str) -> None:
+        """Interpret a SCons script file"""
+        try:
+            prev_dir = self.current_script_dir
+            self.current_script_dir = os.path.dirname(filepath)
+
+            # Add SCons module to Python path
+            converter_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if converter_root not in sys.path:
+                sys.path.insert(0, converter_root)
+
+            with open(filepath, 'r') as f:
+                content = f.read()
+
+            # Execute the SCons script
+            global_dict = self._create_global_namespace()
+            exec(content, global_dict)
+
+            self.current_script_dir = prev_dir
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            raise SConsError(f"Error interpreting {filepath}: {str(e)}")
